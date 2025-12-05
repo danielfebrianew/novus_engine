@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import { pipeline } from 'stream/promises';
+import AdmZip from 'adm-zip';
 
 @Injectable()
 export class GenerateAiService {
@@ -29,35 +30,45 @@ export class GenerateAiService {
   // =================================================================
   // A. PUBLIC METHOD: 1. ANALYZE IMAGE (OpenAI)
   // =================================================================
-  async generateText(imageUrl: string) {
-    this.logger.log(`OpenAI: Analyzing image...`);
+  async generateText(imageUrl: string, count: number = 4) { // Default 4 kalau kosong
+    this.logger.log(`OpenAI: Analyzing image for ${count} prompts...`);
+
+    let durationPrompt = "Target 18-20 detik";
     
-    // Prompt Engineering
+    switch (count) {
+      case 4: durationPrompt = "Target 18-20 detik"; break;
+      case 5: durationPrompt = "Target 23-25 detik"; break;
+      case 6: durationPrompt = "Target 28-30 detik"; break;
+      default:
+        throw new InternalServerErrorException('Count must be 4, 5, or 6');
+    }
+
     const promptText = `
       Analisa gambar ini dengan teliti.
       
       Tugasmu adalah membuat 3 output dalam format JSON:
       
       1. "voiceover": 
-         Buatkan naskah voiceover yang PADAT dan JELAS (Target 15-20 detik).
-         - Gaya bahasa: Storytelling, santai, akrab, seperti me-review barang ke sahabat.
-         - Akhiri dengan ajakan cek keranjang kuning.
+         Naskah voiceover PADAT dan JELAS (${durationPrompt}).
+         Gaya: Storytelling, santai, akrab, akhiri dengan ajakan cek keranjang kuning.
 
       2. "tiktokCaption": 
-         Caption TikTok lengkap, engaging, dan relevan dengan gambar.
-         - Sertakan headline clickbait di baris pertama.
-         - Sertakan 4-5 hashtag relevan.
+         Caption TikTok lengkap + headline clickbait + 4-5 hashtag.
 
-      3. "videoPrompt": 
-         Deskripsi visual singkat dalam Bahasa Inggris untuk AI Video Generator (seperti Wavespeed/Runway).
-         - Deskripsikan gerakan kamera (misal: "Slow pan camera showing the texture...").
-         - Fokus pada detail visual objek di gambar agar hasil videonya konsisten.
+      3. "videoPrompts": 
+         Buatkan ARRAY berisi ${count} prompt visual berbeda dalam Bahasa Inggris.
+         - Setiap prompt harus menggambarkan angle/gerakan kamera yang berbeda (misal: Close up, Pan Left, Zoom In, Reveal).
+         - Fokus pada detail estetika produk.
       
       Format Output WAJIB JSON:
       {
         "voiceover": "teks naskah...",
         "tiktokCaption": "teks caption...",
-        "videoPrompt": "Cinematic shot of..."
+        "videoPrompts": [
+           "Cinematic close up shot of...", 
+           "Slow pan camera showing...",
+           "..."
+        ]
       }
     `;
 
@@ -71,7 +82,6 @@ export class GenerateAiService {
       const content = response.choices[0].message.content;
       if (!content) throw new Error('OpenAI returned empty content');
       
-      // Return Raw JSON (Biar Controller/Interceptor yang format)
       return JSON.parse(content);
 
     } catch (error) {
@@ -80,9 +90,9 @@ export class GenerateAiService {
     }
   }
 
-  // =================================================================
+  // ===================================================================
   // B. PUBLIC METHOD: 2. EXECUTE VIDEO CREATION (Batch + Audio + Merge)
-  // =================================================================
+  // ===================================================================
   async processFullVideo(items: { prompt: string; imageUrl: string }[], script: string) {
     let cleanupFiles: string[] = [];
 
@@ -94,7 +104,7 @@ export class GenerateAiService {
       this.logger.log("Running Wavespeed & Gemini concurrently...");
 
       const videoTasks = items.map((item, idx) => 
-         this._generateSingleVideo(item.prompt, item.imageUrl)
+         this._generateSingleVideo(item.prompt, item.imageUrl, idx, (idx+1).toString()) // Pass Index as Request ID
             .then(url => ({ status: 'success', url, index: idx }))
             .catch(err => ({ status: 'failed', error: err, index: idx }))
       );
@@ -158,35 +168,210 @@ export class GenerateAiService {
     }
   }
 
+  // --- HELPER BARU: TRIM VIDEO ---
+  private _trimVideo(inputPath: string, outputPath: string, duration: number) {
+    return new Promise((resolve, reject) => {
+        ffmpeg(inputPath)
+          .setStartTime(0)
+          .setDuration(duration) // Paksa potong ex: 5 detik
+          .output(outputPath)
+          .on('end', resolve)
+          .on('error', (err) => reject(new Error(`Trim Error: ${err.message}`)))
+          .run();
+    });
+  }
+
+  // =================================================================
+  // PROCESS VARIATIONS -> ZIP OUTPUT
+  // =================================================================
+  async processVideoVariations(imageUrl: string, prompts: string[], script: string) {
+    let cleanupFiles: string[] = [];
+    
+    // 1. Buat ID unik untuk request ini (biar ketahuan kalau Postman ngirim 2x)
+    const PROCESS_ID = `REQ_${Date.now()}`; 
+
+    try {
+      const totalClips = prompts.length;
+      let targetVariations = 0;
+      
+      // Setting Durasi Fix
+      const TARGET_DURATION = 5; 
+
+      if (totalClips === 4) targetVariations = 20;      
+      else if (totalClips === 5) targetVariations = 50; 
+      else if (totalClips === 6) targetVariations = 100;
+      else throw new Error("Jumlah prompt harus 4, 5, atau 6.");
+
+      // LOGGING PENTING: Cek apakah ID ini muncul 2x di terminal?
+      this.logger.log(`[${PROCESS_ID}] === START ENGINE ===`);
+      this.logger.log(`[${PROCESS_ID}] Input Prompts: ${totalClips} items`);
+      this.logger.log(`[${PROCESS_ID}] Target Variations: ${targetVariations} videos`);
+
+      // 2. GENERATE RAW ASSETS (Parallel)
+      const videoTasks = prompts.map((promptText, idx) => 
+         this._generateSingleVideo(promptText, imageUrl, idx, PROCESS_ID) // Pass ID & Index
+            .then(url => ({ status: 'success', url, index: idx }))
+            .catch(err => ({ status: 'failed', error: err, index: idx }))
+      );
+
+      const audioTask = this._generateAudio(script); 
+
+      const [videoResults, audioPath] = await Promise.all([
+        Promise.all(videoTasks),
+        audioTask
+      ]);
+      cleanupFiles.push(audioPath);
+
+      // 3. Download & FORCE TRIM (Potong Paksa)
+      const successVideos = videoResults
+        .filter((r): r is { status: 'success', url: string, index: number } => r.status === 'success')
+        .sort((a, b) => a.index - b.index);
+
+      if (successVideos.length !== totalClips) throw new Error("Gagal generate sebagian klip.");
+
+      const rawClipPaths: string[] = [];
+      
+      for (const vid of successVideos) {
+        // A. Download File Asli (Mungkin 10 detik dari API)
+        const rawFileName = path.join(this.tempDir, `raw_${PROCESS_ID}_${vid.index}.mp4`);
+        this.logger.log(`[${PROCESS_ID}] Downloading Clip #${vid.index}...`);
+        await this._downloadFile(vid.url, rawFileName);
+        cleanupFiles.push(rawFileName);
+
+        // B. POTONG PAKSA JADI 5 DETIK (Solusi durasi)
+        const trimmedFileName = path.join(this.tempDir, `trim_${PROCESS_ID}_${vid.index}.mp4`);
+        this.logger.log(`[${PROCESS_ID}] Trimming Clip #${vid.index} to ${TARGET_DURATION}s...`);
+        
+        await this._trimVideo(rawFileName, trimmedFileName, TARGET_DURATION);
+        
+        rawClipPaths.push(trimmedFileName);
+        cleanupFiles.push(trimmedFileName);
+      }
+
+      // 4. STITCHING VARIATIONS
+      const uniqueOrders = this._generateUniqueShuffles(totalClips, targetVariations);
+      this.logger.log(`[${PROCESS_ID}] Stitching ${uniqueOrders.length} variations...`);
+
+      const zip = new AdmZip(); 
+
+      for (let i = 0; i < uniqueOrders.length; i++) {
+        const order = uniqueOrders[i];
+        const orderedPaths = order.map(index => rawClipPaths[index]);
+        
+        // Stitch Visual
+        const tempVisualPath = path.join(this.tempDir, `vis_${PROCESS_ID}_${i}.mp4`);
+        cleanupFiles.push(tempVisualPath);
+        await this._mergeVideoFiles(orderedPaths, tempVisualPath);
+
+        // Merge Audio
+        const finalVarName = `VARIATION_${i+1}.mp4`;
+        const finalVarPath = path.join(this.tempDir, `VAR_${PROCESS_ID}_${i}.mp4`);
+        cleanupFiles.push(finalVarPath);
+        
+        await new Promise((resolve, reject) => {
+            ffmpeg()
+              .input(tempVisualPath) // Input Video (20s)
+              .input(audioPath)      // Input Audio
+              .outputOptions([
+                  '-c:v copy', '-c:a aac', 
+                  '-map 0:v:0', '-map 1:a:0',
+                  // Hapus -shortest agar video full 20 detik meski audio cuma 15 detik
+              ])
+              .save(finalVarPath)
+              .on('end', resolve)
+              .on('error', reject);
+        });
+
+        zip.addLocalFile(finalVarPath, "", finalVarName);
+      }
+
+      // 5. ZIP
+      const finalZipPath = path.join(this.tempDir, `BUNDLE_${PROCESS_ID}.zip`);
+      zip.writeZip(finalZipPath);
+
+      this.logger.log(`[${PROCESS_ID}] DONE! Zip created.`);
+      return { finalPath: finalZipPath, cleanupFiles };
+
+    } catch (error) {
+       cleanupFiles.forEach(f => { if(fs.existsSync(f)) fs.unlinkSync(f); });
+       // Type assertion
+       const msg = error instanceof Error ? error.message : JSON.stringify(error);
+       this.logger.error(`[${PROCESS_ID}] ERROR: ${msg}`);
+       throw new InternalServerErrorException(msg);
+    }
+  }
+
+  // --- HELPER: SHUFFLE ---
+  private _generateUniqueShuffles(length: number, limit: number): number[][] {
+    const results = new Set<string>();
+    const output: number[][] = [];
+    const baseIndices = Array.from({ length }, (_, i) => i);
+    let attempts = 0;
+    
+    while (output.length < limit && attempts < limit * 20) {
+        attempts++;
+        const shuffled = [...baseIndices].sort(() => Math.random() - 0.5);
+        const key = shuffled.join(',');
+        if (!results.has(key)) {
+            results.add(key);
+            output.push(shuffled);
+        }
+    }
+    return output;
+  }
+
   // =================================================================
   // C. PRIVATE WORKERS (Internal Use Only)
   // =================================================================
 
   // 1. Wavespeed Worker
-  private async _generateSingleVideo(prompt: string, imageUrl: string): Promise<string> {
+  private async _generateSingleVideo(prompt: string, imageUrl: string, index: number, reqId: string): Promise<string> {
     const apiKey = this.configService.get<string>('WAVESPEED_API_KEY');
     const urlSubmit = "https://api.wavespeed.ai/api/v3/bytedance/seedance-v1-pro-fast/image-to-video";
     
+    // Payload Body
+    const payload = { 
+        camera_fixed: false, 
+        duration: 5, 
+        image: imageUrl, 
+        prompt: prompt, 
+        resolution: "480p", 
+        seed: -1 
+    };
+
+    // LOG PARAMETER YANG DIKIRIM (Biar kelihatan di terminal)
+    this.logger.debug(`[${reqId}][Clip ${index}] Sending Request to Wavespeed...`);
+    this.logger.verbose(`[${reqId}][Clip ${index}] Payload: ${JSON.stringify(payload)}`);
+
     const submitResp = await fetch(urlSubmit, {
         method: 'POST',
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-        body: JSON.stringify({ camera_fixed: false, duration: 10, image: imageUrl, prompt, resolution: "480p", seed: -1 })
+        body: JSON.stringify(payload)
     });
 
-    if (!submitResp.ok) throw new Error(await submitResp.text());
+    if (!submitResp.ok) {
+        const errText = await submitResp.text();
+        this.logger.error(`[${reqId}][Clip ${index}] Wavespeed Error: ${errText}`);
+        throw new Error(errText);
+    }
+    
     const { data: { id: requestId } } = await submitResp.json();
+    this.logger.log(`[${reqId}][Clip ${index}] Job ID: ${requestId} | Polling started...`);
 
-    // Polling
+    // Polling Logic
     let attempts = 0;
     while (attempts < 60) {
         attempts++;
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 3000)); // Interval 3 detik
         const statusResp = await fetch(`https://api.wavespeed.ai/api/v3/predictions/${requestId}/result`, {
             headers: { "Authorization": `Bearer ${apiKey}` }
         });
         const statusData = await statusResp.json();
         
-        if (statusData.data.status === "completed") return statusData.data.outputs[0];
+        if (statusData.data.status === "completed") {
+            this.logger.log(`[${reqId}][Clip ${index}] COMPLETED!`);
+            return statusData.data.outputs[0];
+        }
         if (statusData.data.status === "failed") throw new Error(statusData.data.error);
     }
     throw new Error("Wavespeed Timeout");
