@@ -1,4 +1,4 @@
-import { IsArray, IsNotEmpty, IsString, IsUrl, IsInt, Min, Max, IsOptional } from 'class-validator';
+import { IsArray, IsNotEmpty, IsString, IsUrl, IsInt, Min, Max, IsOptional, ArrayMinSize } from 'class-validator';
 
 // 1. DTO UNTUK ENDPOINT /text
 export class GenerateTextDto {
@@ -15,9 +15,10 @@ export class GenerateTextDto {
 
 // 2. DTO Utama (Variations) - TETAP SAMA
 export class GenerateVideoDto {
-  @IsNotEmpty()
-  @IsUrl()
-  imageUrl: string; 
+  @IsArray()
+  @ArrayMinSize(1, { message: "Minimal harus ada 1 gambar." })
+  @IsUrl({}, { each: true, message: "Setiap item dalam images harus berupa URL valid." })
+  images: string[]; 
 
   @IsArray()
   @IsString({ each: true })

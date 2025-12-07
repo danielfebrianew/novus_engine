@@ -1,4 +1,15 @@
-import { Body, Controller, Post, Res } from '@nestjs/common';
+import { 
+  Body, 
+  Controller, 
+  Post, 
+  Res, 
+  UseInterceptors, 
+  UploadedFile, 
+  BadRequestException,
+  InternalServerErrorException 
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import 'multer';
 import type { Response } from 'express';
 import * as fs from 'fs';
 import { GenerateAiService } from './generate-ai.service';
@@ -8,21 +19,25 @@ import { GenerateTextDto, GenerateVideoDto } from './dto/generate-ai.dto';
 export class GenerateAiController {
   constructor(private readonly generateAiService: GenerateAiService) {}
 
-  // 1. ANALISA GAMBAR (Dapet Script & Ide Prompt)
+  // ==========================================
+  // 1. ENDPOINT ANALISA (TEXT ONLY)
+  // ==========================================
   @Post('text')
   async generateText(@Body() dto: GenerateTextDto) {
-    // Kirim imageUrl dan promptCount (atau default undefined/4)
+    // Menggunakan promptCount dari DTO atau default 4
     return this.generateAiService.generateText(dto.imageUrl, dto.promptCount);
   }
 
-  // 2. EKSEKUSI VARIASI (Langsung ZIP)
+  // ==========================================
+  // 2. ENDPOINT EKSEKUSI (VIDEO ZIP)
+  // ==========================================
   @Post('video')
   async generateVideo(
     @Body() dto: GenerateVideoDto, 
     @Res() res: Response
   ) {
     try {
-      // Validasi: Jumlah prompt harus 4, 5, atau 6
+      // Validasi Manual: Jumlah Prompt harus 4, 5, atau 6
       const count = dto.prompts.length;
       if (![4, 5, 6].includes(count)) {
          return res.status(400).json({ 
@@ -31,27 +46,62 @@ export class GenerateAiController {
          });
       }
 
-      // Panggil Service Variasi
+      // Panggil Service (support multi-image round robin)
       const result = await this.generateAiService.processVideoVariations(
-          dto.imageUrl, 
+          dto.images, 
           dto.prompts, 
           dto.script
       );
 
-      // Download ZIP
+      // Kirim ZIP ke User
       res.download(result.finalPath, 'video_variations.zip', (err) => {
-        if (err) console.error("Download Error:", err);
+        if (err) {
+            console.error("Download Error:", err);
+        }
 
-        // CLEANUP
+        // --- CLEANUP LOGIC ---
+        // 1. Hapus File ZIP Final
         if (fs.existsSync(result.finalPath)) fs.unlinkSync(result.finalPath);
-        result.cleanupFiles.forEach(f => {
-            if (fs.existsSync(f)) fs.unlinkSync(f);
-        });
+        
+        // 2. Hapus Semua File Sampah (Raw Clips, Stitched Visuals, Audio)
+        if (result.cleanupFiles && result.cleanupFiles.length > 0) {
+            result.cleanupFiles.forEach(f => {
+                if (fs.existsSync(f)) fs.unlinkSync(f);
+            });
+        }
+
         console.log("Cleanup Selesai.");
       });
 
     } catch (error) {
-      res.status(500).json({ statusCode: 500, message: error.message });
+      // Safety check error type
+      const msg = error instanceof Error ? error.message : 'Internal Server Error';
+      
+      // Cegah error "Can't set headers after they are sent"
+      if (!res.headersSent) {
+          res.status(500).json({ statusCode: 500, message: msg });
+      }
     }
+  }
+
+  // ==========================================
+  // 3. ENDPOINT UPLOAD IMAGE
+  // ==========================================
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file')) // Nama field di Postman harus 'file'
+  async uploadFile(@UploadedFile() file: Express.Multer.File) {
+      if (!file) throw new BadRequestException('File tidak ditemukan');
+      
+      // Validasi tipe file (harus gambar)
+      if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
+          throw new BadRequestException('Hanya boleh upload file gambar (jpg, png, webp)');
+      }
+
+      try {
+          return await this.generateAiService.uploadImage(file);
+      } catch (error) {
+          const msg = error instanceof Error ? error.message : 'Upload Failed';
+          throw new InternalServerErrorException(msg);
+      }
   }
 }
