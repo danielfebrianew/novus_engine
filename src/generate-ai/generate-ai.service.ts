@@ -8,6 +8,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import AdmZip from 'adm-zip';
 import { VideoUtilsHelper } from './helpers/video-utils.helper';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { pipeline } from 'stream/promises'; // Ensure this is imported if used in _downloadFile (though logic is in helper now)
 
 @Injectable()
 export class GenerateAiService implements OnModuleInit {
@@ -40,7 +41,7 @@ export class GenerateAiService implements OnModuleInit {
     // 3. Ensure Temp Directory
     if (!fs.existsSync(this.tempDir)) fs.mkdirSync(this.tempDir);
 
-    // 4. Init AWS S3 (MASUKKAN LOGIC INI KE DALAM CONSTRUCTOR)
+    // 4. Init AWS S3 (DENGAN LOGGING & VALIDASI)
     const region = this.configService.get<string>('AWS_REGION');
     const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
     const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
@@ -48,13 +49,14 @@ export class GenerateAiService implements OnModuleInit {
     // Ambil bucket name ke variabel lokal dulu
     const bucket = this.configService.get<string>('AWS_BUCKET_NAME');
 
+    this.logger.log(`Checking AWS Config -> Region: ${region}, Bucket: ${bucket}`);
+
     // Validasi Manual: Pastikan semua variabel ada
     if (!region || !accessKeyId || !secretAccessKey || !bucket) {
         throw new Error("⚠️ AWS S3 Configuration is MISSING in .env file!");
     }
 
     // Assign ke property class SETELAH validasi sukses
-    // TypeScript sekarang tau 'bucket' pasti string (bukan undefined)
     this.bucketName = bucket;
 
     try {
@@ -95,15 +97,71 @@ export class GenerateAiService implements OnModuleInit {
   }
 
   // =================================================================
+  // UPLOAD HELPER (S3)
+  // =================================================================
+  private async _uploadToS3(fileInput: string | Buffer, fileName: string, contentType: string): Promise<string> {
+    if (!this.s3Client) throw new InternalServerErrorException("S3 Client belum siap.");
+
+    try {
+      let body: Buffer<ArrayBufferLike>;
+      if (typeof fileInput === 'string') {
+          body = fs.readFileSync(fileInput); // Baca file dari disk jika inputnya path
+      } else {
+          body = fileInput; // Pakai buffer langsung jika dari upload
+      }
+
+      await this.s3Client.send(new PutObjectCommand({
+        Bucket: this.bucketName,
+        Key: fileName,
+        Body: body,
+        ContentType: contentType,
+        ACL: 'public-read', 
+      }));
+
+      const region = this.configService.get<string>('AWS_REGION');
+      return `https://${this.bucketName}.s3.${region}.amazonaws.com/${fileName}`;
+      
+    } catch (error) {
+      this.logger.error(`S3 Upload Error: ${error.message}`);
+      throw new InternalServerErrorException("Gagal upload ke AWS S3");
+    }
+  }
+
+  // =================================================================
+  // PUBLIC: UPLOAD IMAGE (Updated with Auto-Crop)
+  // =================================================================
+  async uploadImages(files: Array<Express.Multer.File>) {
+    try {
+        const uploadedUrls: string[] = [];
+
+        // Loop setiap file yang diupload
+        for (const file of files) {
+            // Nama file unik
+            const fileName = `input_${Date.now()}_${Math.round(Math.random()*1000)}_${file.originalname}`;
+            
+            this.logger.log(`Uploading raw image (frontend cropped): ${fileName}`);
+
+            // Langsung upload Buffer (Tanpa Sharp Crop)
+            const publicUrl = await this._uploadToS3(file.buffer, fileName, file.mimetype);
+            uploadedUrls.push(publicUrl);
+        }
+        
+        return { 
+            message: `${files.length} images uploaded successfully`,
+            imageUrls: uploadedUrls 
+        };
+    } catch (error) {
+        throw new InternalServerErrorException("Gagal upload image: " + error.message);
+    }
+  }
+
+  // =================================================================
   // A. PUBLIC METHOD: 1. ANALYZE IMAGE (OpenAI)
   // =================================================================
   async generateText(imageUrl: string, count: number = 4) {
     this.logger.log(`OpenAI: Analyzing image for ${count} prompts...`);
 
     let finalImageUrl = imageUrl;
-    
-    // Opsional: Logic crop gambar lokal untuk analisa (jika helper support)
-    // ...
 
     let durationPrompt = "Target ≈20 detik (±35-40 kata)";
     switch (count) {
@@ -114,12 +172,29 @@ export class GenerateAiService implements OnModuleInit {
     }
 
     const promptText = `
-      Analisa gambar ini dengan TELITI.
+      Analisa gambar ini dengan TELITI dan detail visual yang jelas.
+      
       Tugasmu adalah membuat 3 output dalam format JSON:
-      1. "voiceover": Naskah voiceover WILAYAH PADAT tapi TIDAK TERBURU-BURU. Durasi: ${durationPrompt}. Gunakan storytelling santai. WAJIB ditutup dengan ajakan: "Langsung cek keranjang kuning di bawah video ini."
-      2. "tiktokCaption": Caption TikTok FULL + headline clickbait + hashtag.
-      3. "videoPrompts": ARRAY berisi ${count} prompt visual berbeda dalam Bahasa Inggris. Fokus pada estetika.
-      FORMAT OUTPUT WAJIB PERSIS JSON: { "voiceover": "...", "tiktokCaption": "...", "videoPrompts": [...] }
+      
+      1. "voiceover": 
+         Naskah voiceover WILAYAH PADAT tapi TIDAK TERBURU-BURU. 
+         Durasi: ${durationPrompt}. 
+         Gunakan storytelling santai dan akrab. 
+         Pakai kalimat mengalir. 
+         WAJIB ditutup dengan ajakan: "Langsung cek keranjang kuning di bawah video ini."
+
+      2. "tiktokCaption": 
+         Caption TikTok FULL (1 paragraf). 
+         Awali dengan headline clickbait. 
+         Tambahkan 4–5 hashtag relevan.
+
+      3. "videoPrompts": 
+         Buatkan ARRAY berisi ${count} prompt visual berbeda dalam Bahasa Inggris. 
+         Setiap prompt HARUS menggunakan angle/gerakan kamera BERBEDA (Close Up, Slow Pan Left, Zoom In, dll). 
+         Fokus pada estetika produk.
+      
+      FORMAT OUTPUT WAJIB PERSIS JSON: 
+      { "voiceover": "...", "tiktokCaption": "...", "videoPrompts": [...] }
     `;
 
     try {
@@ -140,64 +215,6 @@ export class GenerateAiService implements OnModuleInit {
   }
 
   // =================================================================
-  // UPLOAD HELPER (S3)
-  // =================================================================
-  private async _uploadToS3(fileInput: string | Buffer, fileName: string, contentType: string = 'application/zip'): Promise<string> {
-    if (!this.s3Client) {
-        throw new InternalServerErrorException("S3 Client belum siap.");
-    }
-
-    try {
-      let body;
-      if (typeof fileInput === 'string') {
-          body = fs.readFileSync(fileInput);
-      } else {
-          body = fileInput;
-      }
-
-      await this.s3Client.send(new PutObjectCommand({
-        Bucket: this.bucketName,
-        Key: fileName,
-        Body: body,
-        ContentType: contentType,
-        ACL: 'public-read', 
-      }));
-
-      const region = this.configService.get<string>('AWS_REGION');
-      return `https://${this.bucketName}.s3.${region}.amazonaws.com/${fileName}`;
-      
-    } catch (error) {
-      this.logger.error(`S3 Upload Error: ${error.message}`);
-      throw new InternalServerErrorException("Gagal upload ke AWS S3: " + error.message);
-    }
-  }
-
-  // =================================================================
-  // PUBLIC: UPLOAD IMAGE
-  // =================================================================
-  async uploadImage(file: Express.Multer.File) {
-    try {
-        const fileName = `input_${Date.now()}_${file.originalname}`;
-        
-        this.logger.log("Processing image to 9:16 ratio...");
-
-        // 1. Crop
-        const croppedBuffer = await this.videoUtilsHelper.processImageTo916(file.buffer);
-        
-        // 2. Upload
-        const publicUrl = await this._uploadToS3(croppedBuffer, fileName, file.mimetype);
-        
-        return { 
-            url: publicUrl,
-            fileName: fileName,
-            message: "Image cropped & uploaded"
-        };
-    } catch (error) {
-        throw new InternalServerErrorException("Gagal upload image: " + error.message);
-    }
-  }
-
-  // =================================================================
   // B. PUBLIC METHOD: PROCESS VARIATIONS -> ZIP OUTPUT
   // =================================================================
   async processVideoVariations(images: string[], prompts: string[], script: string) {
@@ -213,12 +230,12 @@ export class GenerateAiService implements OnModuleInit {
       else if (totalClips === 6) targetVariations = 100;
       else throw new Error("Jumlah prompt harus 4, 5, atau 6.");
 
-      this.logger.log(`[${PROCESS_ID}] === START ENGINE ===`);
-      this.logger.log(`[${PROCESS_ID}] Prompts: ${totalClips} | Variations: ${targetVariations}`);
+      this.logger.log(`[${PROCESS_ID}] Start Engine: ${totalClips} clips -> ${targetVariations} vars`);
 
-      // 1. GENERATE RAW ASSETS (Parallel)
+      // 1. GENERATE RAW CLIPS (Parallel - Sama seperti sebelumnya)
       const videoTasks = prompts.map((promptText, idx) => {
-         const selectedImage = images[idx] ? images[idx] : images[0];
+         // Logic Round Robin Image
+         const selectedImage = images[idx] ? images[idx] : images[0]; 
          return this._generateSingleVideo(promptText, selectedImage, idx, PROCESS_ID)
             .then(url => ({ status: 'success', url, index: idx }))
             .catch(err => ({ status: 'failed', error: err, index: idx }));
@@ -232,7 +249,7 @@ export class GenerateAiService implements OnModuleInit {
       ]);
       cleanupFiles.push(audioPath);
 
-      // 2. Download Raw Clips
+      // 2. DOWNLOAD RAW CLIPS
       const successVideos = videoResults
         .filter((r): r is { status: 'success', url: string, index: number } => r.status === 'success')
         .sort((a, b) => a.index - b.index);
@@ -240,22 +257,19 @@ export class GenerateAiService implements OnModuleInit {
       if (successVideos.length !== totalClips) throw new Error("Gagal generate sebagian klip.");
 
       const rawClipPaths: string[] = [];
-      
       for (const vid of successVideos) {
         const rawFileName = path.join(this.tempDir, `raw_${PROCESS_ID}_${vid.index}.mp4`);
-        this.logger.log(`[${PROCESS_ID}] Downloading Clip #${vid.index}...`);
-        
         await this.videoUtilsHelper.downloadFile(vid.url, rawFileName);
         
         rawClipPaths.push(rawFileName);
         cleanupFiles.push(rawFileName);
       }
 
-      // 3. STITCHING VARIATIONS
+      // 3. STITCHING & UPLOAD PER VARIATION
       const uniqueOrders = this.videoUtilsHelper.generateUniqueShuffles(totalClips, targetVariations);
-      this.logger.log(`[${PROCESS_ID}] Stitching ${uniqueOrders.length} variations...`);
+      this.logger.log(`[${PROCESS_ID}] Stitching & Uploading ${uniqueOrders.length} variations...`);
 
-      const zip = new AdmZip(); 
+      const resultUrls: string[] = []; // Array untuk menampung URL hasil
 
       for (let i = 0; i < uniqueOrders.length; i++) {
         const order = uniqueOrders[i];
@@ -267,35 +281,42 @@ export class GenerateAiService implements OnModuleInit {
         
         await this.videoUtilsHelper.mergeVideoFiles(orderedPaths, tempVisualPath);
 
-        // B. Merge Audio (Video + Audio)
-        const finalVarName = `VARIATION_${i+1}.mp4`;
-        const finalVarPath = path.join(this.tempDir, `VAR_${PROCESS_ID}_${i}.mp4`);
+        // B. Merge Audio (Final Video)
+        const finalFileName = `VARIATION_${PROCESS_ID}_${i+1}.mp4`;
+        const finalVarPath = path.join(this.tempDir, finalFileName);
         cleanupFiles.push(finalVarPath);
         
         await new Promise((resolve, reject) => {
             ffmpeg()
-              .input(tempVisualPath) // Video
-              .input(audioPath)      // Audio
-              .outputOptions([
-                  '-c:v copy', '-c:a aac', 
-                  '-map 0:v:0', '-map 1:a:0',
-                  // Tanpa -shortest agar video full
-              ])
+              .input(tempVisualPath)
+              .input(audioPath)
+              .outputOptions(['-c:v copy', '-c:a aac', '-map 0:v:0', '-map 1:a:0'])
               .save(finalVarPath)
               .on('end', resolve)
               .on('error', reject);
         });
 
-        // C. Masuk ZIP
-        zip.addLocalFile(finalVarPath, "", finalVarName);
+        // C. UPLOAD INDIVIDUAL VIDEO TO S3 (Ganti ZIP logic)
+        this.logger.log(`[${PROCESS_ID}] Uploading Variant ${i+1}/${uniqueOrders.length}...`);
+        
+        // Upload file hasil merge (finalVarPath) ke S3
+        const s3Url = await this._uploadToS3(finalVarPath, `results/${PROCESS_ID}/${finalFileName}`, 'video/mp4');
+        
+        resultUrls.push(s3Url);
       }
 
-      // 4. WRITE ZIP
-      const finalZipPath = path.join(this.tempDir, `BUNDLE_${PROCESS_ID}.zip`);
-      zip.writeZip(finalZipPath);
+      // 4. CLEANUP & RETURN
+      // Hapus file sampah lokal
+      cleanupFiles.forEach(f => { if(fs.existsSync(f)) fs.unlinkSync(f); });
 
-      this.logger.log(`[${PROCESS_ID}] DONE! Zip created.`);
-      return { finalPath: finalZipPath, cleanupFiles };
+      this.logger.log(`[${PROCESS_ID}] DONE! ${resultUrls.length} videos uploaded.`);
+      
+      // Return Array of URLs
+      return { 
+          jobId: PROCESS_ID,
+          totalVariations: resultUrls.length,
+          variations: resultUrls 
+      };
 
     } catch (error) {
        cleanupFiles.forEach(f => { if(fs.existsSync(f)) fs.unlinkSync(f); });

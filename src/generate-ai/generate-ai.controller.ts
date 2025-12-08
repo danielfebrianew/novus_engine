@@ -4,14 +4,12 @@ import {
   Post, 
   Res, 
   UseInterceptors, 
-  UploadedFile, 
+  UploadedFiles, // <--- Ganti UploadedFile jadi UploadedFiles
   BadRequestException,
   InternalServerErrorException 
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
-import 'multer';
+import { FilesInterceptor } from '@nestjs/platform-express'; // <--- Ganti FileInterceptor
 import type { Response } from 'express';
-import * as fs from 'fs';
 import { GenerateAiService } from './generate-ai.service';
 import { GenerateTextDto, GenerateVideoDto } from './dto/generate-ai.dto';
 
@@ -19,25 +17,21 @@ import { GenerateTextDto, GenerateVideoDto } from './dto/generate-ai.dto';
 export class GenerateAiController {
   constructor(private readonly generateAiService: GenerateAiService) {}
 
-  // ==========================================
-  // 1. ENDPOINT ANALISA (TEXT ONLY)
-  // ==========================================
+  // 1. ANALISA TEXT (Tetap Sama)
   @Post('text')
   async generateText(@Body() dto: GenerateTextDto) {
-    // Menggunakan promptCount dari DTO atau default 4
+    // Analisa tetap butuh 1 gambar utama sebagai referensi
+    // Jika user upload banyak, Frontend kirim salah satu URL saja ke sini
     return this.generateAiService.generateText(dto.imageUrl, dto.promptCount);
   }
 
-  // ==========================================
-  // 2. ENDPOINT EKSEKUSI (VIDEO ZIP)
-  // ==========================================
+  // 2. EKSEKUSI VIDEO (Output JSON Array URL)
   @Post('video')
   async generateVideo(
     @Body() dto: GenerateVideoDto, 
-    @Res() res: Response
+    @Res() res: Response // Tetap pakai Res untuk kontrol status code leluasa
   ) {
     try {
-      // Validasi Manual: Jumlah Prompt harus 4, 5, atau 6
       const count = dto.prompts.length;
       if (![4, 5, 6].includes(count)) {
          return res.status(400).json({ 
@@ -46,59 +40,42 @@ export class GenerateAiController {
          });
       }
 
-      // Panggil Service (support multi-image round robin)
+      // Panggil Service
       const result = await this.generateAiService.processVideoVariations(
           dto.images, 
           dto.prompts, 
           dto.script
       );
 
-      // Kirim ZIP ke User
-      res.download(result.finalPath, 'video_variations.zip', (err) => {
-        if (err) {
-            console.error("Download Error:", err);
-        }
-
-        // --- CLEANUP LOGIC ---
-        // 1. Hapus File ZIP Final
-        if (fs.existsSync(result.finalPath)) fs.unlinkSync(result.finalPath);
-        
-        // 2. Hapus Semua File Sampah (Raw Clips, Stitched Visuals, Audio)
-        if (result.cleanupFiles && result.cleanupFiles.length > 0) {
-            result.cleanupFiles.forEach(f => {
-                if (fs.existsSync(f)) fs.unlinkSync(f);
-            });
-        }
-
-        console.log("Cleanup Selesai.");
+      // Return JSON berisi List URL Video
+      return res.status(200).json({
+          statusCode: 200,
+          message: "Success",
+          data: result // { variations: ["url1", "url2", ...] }
       });
 
     } catch (error) {
-      // Safety check error type
       const msg = error instanceof Error ? error.message : 'Internal Server Error';
-      
-      // Cegah error "Can't set headers after they are sent"
-      if (!res.headersSent) {
-          res.status(500).json({ statusCode: 500, message: msg });
-      }
+      return res.status(500).json({ statusCode: 500, message: msg });
     }
   }
 
-  // ==========================================
-  // 3. ENDPOINT UPLOAD IMAGE
-  // ==========================================
+  // 3. UPLOAD MULTIPLE IMAGES (Max 6)
   @Post('upload')
-  @UseInterceptors(FileInterceptor('file')) // Nama field di Postman harus 'file'
-  async uploadFile(@UploadedFile() file: Express.Multer.File) {
-      if (!file) throw new BadRequestException('File tidak ditemukan');
+  @UseInterceptors(FilesInterceptor('files', 6)) // Max 6 file, field name 'files'
+  async uploadFiles(@UploadedFiles() files: Array<Express.Multer.File>) {
+      if (!files || files.length === 0) throw new BadRequestException('File tidak ditemukan');
       
-      // Validasi tipe file (harus gambar)
-      if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
-          throw new BadRequestException('Hanya boleh upload file gambar (jpg, png, webp)');
+      // Validasi tipe file
+      for (const file of files) {
+        if (!file.mimetype.match(/\/(jpg|jpeg|png|webp)$/)) {
+            throw new BadRequestException('Hanya boleh upload file gambar (jpg, png, webp)');
+        }
       }
 
       try {
-          return await this.generateAiService.uploadImage(file);
+          // Panggil service upload multi
+          return await this.generateAiService.uploadImages(files);
       } catch (error) {
           const msg = error instanceof Error ? error.message : 'Upload Failed';
           throw new InternalServerErrorException(msg);
