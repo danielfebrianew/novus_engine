@@ -28,4 +28,8 @@ export class GenerateVideoDto {
   @IsString()
   @IsNotEmpty()
   script: string;
+
+  @IsString()
+  @IsNotEmpty()
+  jobId: string;
 }

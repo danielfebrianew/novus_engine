@@ -2,8 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path'; 
 import ffmpeg from 'fluent-ffmpeg';
-import { pipeline } from 'stream/promises';
-import sharp from 'sharp';
+import axios from 'axios';
 
 @Injectable()
 export class VideoUtilsHelper {
@@ -35,15 +34,24 @@ export class VideoUtilsHelper {
     return output;
   }
 
-  // 2. Download File
+  // 2. Download File (Stream to File)
   async downloadFile(url: string, outputPath: string): Promise<void> {
     try {
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
-      if (!response.body) throw new Error('Response body is empty');
+      const response = await axios({
+        url,
+        method: 'GET',
+        responseType: 'stream' // Important for piping
+      });
 
-      // @ts-ignore
-      await pipeline(response.body, fs.createWriteStream(outputPath));
+      const writer = fs.createWriteStream(outputPath);
+      
+      // Axios response.data IS the stream
+      response.data.pipe(writer);
+
+      return new Promise((resolve, reject) => {
+        writer.on('finish', resolve);
+        writer.on('error', reject);
+      });
     } catch (error) {
       this.logger.error(`Download Error: ${error.message}`);
       throw error;
@@ -66,13 +74,7 @@ export class VideoUtilsHelper {
   // 4. Merge Video (Stitching) - VERSI LEBIH ROBUST (Concat Filter)
   mergeVideoFiles(inputs: string[], output: string): Promise<void> {
     return new Promise((resolve, reject) => {
-      // Kita gunakan filter complex 'concat' agar lebih aman untuk MP4
-      // Format: [0:v][0:a][1:v][1:a]... concat=n=2:v=1:a=1 [v] [a]
-      // Karena video Wavespeed mungkin tidak ada audio, kita fokus visual dulu [v]
-      
       const inputArgs = inputs.flatMap(input => ['-i', input]);
-      
-      // Buat filter string: [0:v][1:v][2:v]... concat=n=X:v=1:a=0 [v]
       const filterInputs = inputs.map((_, i) => `[${i}:v]`).join('');
       const filterComplex = `${filterInputs}concat=n=${inputs.length}:v=1:a=0[v]`;
 
@@ -137,80 +139,32 @@ export class VideoUtilsHelper {
     return Buffer.concat([wavHeader, buffer]);
   }
 
-  async downloadAndCropImage(url: string, prefix: string): Promise<string> {
+  async downloadImageToBuffer(url: string, prefix: string): Promise<string> {
     try {
-      // 1. Download Gambar dari URL ke Buffer
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
+      this.logger.log(`Downloading image for analysis: ${url}`);
+      
+      // 1. Download Gambar dari URL via Axios
+      const response = await axios({
+        url,
+        method: 'GET',
+        responseType: 'arraybuffer' // Get buffer directly
+      });
+
+      const buffer = Buffer.from(response.data);
 
       // 2. Setup Path Output
       const filename = `${prefix}_${Date.now()}.jpg`;
       const outputPath = path.join(this.tempDir, filename);
 
-      // 3. Sharp Resize & Crop 9:16 (720x1280)
-      await sharp(buffer)
-        .resize(720, 1280, {
-          fit: 'cover',       // Crop tengah otomatis
-          position: 'center'
-        })
-        .toFile(outputPath);
+      // 3. Save Buffer to File (RAW - NO CROPPING)
+      fs.writeFileSync(outputPath, buffer);
 
-      this.logger.log(`✅ Image cropped: ${filename}`);
-      return outputPath; // Mengembalikan path file lokal
+      this.logger.log(`✅ Image downloaded: ${filename}`);
+      return outputPath; 
 
     } catch (error) {
-      this.logger.error(`Gagal crop image: ${url}`, error);
-      throw error; // Biarkan error naik ke atas
-    }
-  }
-
-  async processImageTo916(buffer: Buffer): Promise<Buffer> {
-    try {
-      const image = sharp(buffer);
-      const metadata = await image.metadata();
-
-      const originalWidth = metadata.width || 0;
-      const originalHeight = metadata.height || 0;
-
-      if (originalWidth === 0 || originalHeight === 0) {
-        throw new Error('Gagal membaca dimensi gambar.');
-      }
-
-      // Target Rasio 9:16 = 0.5625
-      const targetRatio = 9 / 16;
-      const currentRatio = originalWidth / originalHeight;
-
-      let targetWidth, targetHeight;
-
-      // LOGIKA MATEMATIKA:
-      // Kita cari kotak 9:16 terbesar yang muat di dalam gambar asli
-      
-      if (currentRatio > targetRatio) {
-        // Kasus 1: Gambar terlalu Lebar (Landscape/Square)
-        // Patokannya adalah Tinggi (Height) tetap maksimal
-        targetHeight = originalHeight;
-        targetWidth = Math.round(originalHeight * targetRatio);
-      } else {
-        // Kasus 2: Gambar terlalu Tinggi (Sangat Portrait)
-        // Patokannya adalah Lebar (Width) tetap maksimal
-        targetWidth = originalWidth;
-        targetHeight = Math.round(originalWidth * (16 / 9));
-      }
-
-      this.logger.log(`Cropping Image: ${originalWidth}x${originalHeight} -> ${targetWidth}x${targetHeight}`);
-
-      return await image
-        .resize(targetWidth, targetHeight, {
-          fit: 'cover',      // Crop bagian tengah (center) jika rasio beda
-          position: 'center' // Fokus di tengah
-        })
-        .toBuffer();
-
-    } catch (error) {
-      this.logger.error(`Sharp Error: ${error.message}`);
-      throw error;
+      this.logger.error(`Failed to download image: ${url}`, error);
+      throw error; 
     }
   }
 }

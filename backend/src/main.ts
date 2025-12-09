@@ -2,9 +2,22 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { TransformInterceptor } from './common/response.interceptor';
+import { json, urlencoded } from 'express';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // 1. AKTIFKAN CORS (Agar Frontend 3001 bisa tembak Backend 3000)
+  app.enableCors({
+    origin: "http://localhost:3001", 
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    credentials: true,
+    allowedHeaders: 'Content-Type, Accept, Authorization',
+  });
+
+  // 2. NAIKKAN LIMIT UPLOAD (Penting buat upload gambar/video)
+  app.use(json({ limit: '50mb' }));
+  app.use(urlencoded({ extended: true, limit: '50mb' }));
 
   app.useGlobalPipes(new ValidationPipe());
 

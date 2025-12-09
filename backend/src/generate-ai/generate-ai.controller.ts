@@ -4,24 +4,51 @@ import {
   Post, 
   Res, 
   UseInterceptors, 
-  UploadedFiles, // <--- Ganti UploadedFile jadi UploadedFiles
+  UploadedFiles,
   BadRequestException,
-  InternalServerErrorException 
+  InternalServerErrorException, 
+  Sse,         
+  MessageEvent,
+  Param,
 } from '@nestjs/common';
-import { FilesInterceptor } from '@nestjs/platform-express'; // <--- Ganti FileInterceptor
+import { FilesInterceptor } from '@nestjs/platform-express'; 
 import type { Response } from 'express';
 import { GenerateAiService } from './generate-ai.service';
 import { GenerateTextDto, GenerateVideoDto } from './dto/generate-ai.dto';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Observable, fromEvent } from 'rxjs';
+import { map, filter } from 'rxjs/operators';
 
 @Controller('generate')
 export class GenerateAiController {
-  constructor(private readonly generateAiService: GenerateAiService) {}
+  constructor(private readonly generateAiService: GenerateAiService, private eventEmitter: EventEmitter2) {}
+
+  // Di Controller
+@Sse('progress/:jobId')
+sse(@Param('jobId') jobId: string): Observable<MessageEvent> {
+  return fromEvent(this.eventEmitter, 'job.progress').pipe(
+    // 1. Filter ID
+    filter((payload: any) => payload.jobId === jobId),
+    
+    // 2. Map & DEBUG (Tambahkan log di sini)
+    map((payload: any) => {
+      // --> CEK DISINI: Apa isi payload sebenarnya?
+      console.log(`[SSE OUT] Job: ${jobId} | Progress: ${payload.progress} | Msg: ${payload.message}`);
+
+      return {
+        data: { 
+            message: payload.message, 
+            // Pastikan kalau payload.progress undefined, kirim null atau 0
+            progress: payload.progress ?? null 
+        },
+      } as MessageEvent;
+    }),
+  );
+}
 
   // 1. ANALISA TEXT (Tetap Sama)
   @Post('text')
   async generateText(@Body() dto: GenerateTextDto) {
-    // Analisa tetap butuh 1 gambar utama sebagai referensi
-    // Jika user upload banyak, Frontend kirim salah satu URL saja ke sini
     return this.generateAiService.generateText(dto.imageUrl, dto.promptCount);
   }
 
@@ -29,7 +56,7 @@ export class GenerateAiController {
   @Post('video')
   async generateVideo(
     @Body() dto: GenerateVideoDto, 
-    @Res() res: Response // Tetap pakai Res untuk kontrol status code leluasa
+    @Res() res: Response 
   ) {
     try {
       const count = dto.prompts.length;
@@ -44,7 +71,8 @@ export class GenerateAiController {
       const result = await this.generateAiService.processVideoVariations(
           dto.images, 
           dto.prompts, 
-          dto.script
+          dto.script,
+          dto.jobId
       );
 
       // Return JSON berisi List URL Video
