@@ -5,6 +5,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { UsersModule } from './users/users.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
+import { VideoMixerModule } from './video-mixer/video-mixer.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { AuthModule } from './auth/auth.module';
     GenerateAiModule,
     UsersModule,
     AuthModule,
+    VideoMixerModule,
   ],
   controllers: [],
   providers: [],
