@@ -10,7 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import toast, { Toaster } from 'react-hot-toast';
 import ImageCropper from "@/components/ImageCropper";
 
-import type { UploadResponse, TextAnalysisResponse, VideoGenerationResponse } from "@/types/api";
+import type { UploadResponse, VideoGenerationResponse } from "@/types/api";
 
 const blobToFile = (theBlob: Blob, fileName: string): File => {
   // 1. Ambil ekstensi file (misal .jpg)

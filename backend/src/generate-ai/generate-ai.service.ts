@@ -331,7 +331,7 @@ export class GenerateAiService implements OnModuleInit {
         duration: 5, 
         image: imageUrl, 
         prompt: prompt, 
-        resolution: "480p", 
+        resolution: "720p", 
         seed: -1 
     };
 
