@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation"
 import Link from "next/link"
 import { Button } from "@/components/ui/button"
 import Cookies from "js-cookie"
-import { User, LogOut, Menu } from "lucide-react"
+import { User, LogOut, Menu, Film } from "lucide-react"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,32 +50,40 @@ export function Navbar() {
     router.refresh()
   }
 
-  const getInitials = (name: string) => {
-    return name
-      ?.split(" ")
-      .map((n) => n[0])
-      .join("")
-      .toUpperCase()
-      .substring(0, 2) || "U"
-  }
-
   if (!isMounted) return null
 
   return (
-    <header className="flex items-center justify-between p-6 border-b bg-white">
+    <header className="flex items-center p-6 border-b bg-white">
       <Link href="/">
         <h1 className="text-2xl font-bold bg-linear-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent cursor-pointer">
           Novus Next Gen
         </h1>
       </Link>
 
-      <div className="flex items-center gap-4">
+      {/* 2. BAGIAN TENGAH: LINK VIDEO MIXER (Masuk Flow Layout) */}
+      <nav className="hidden md:flex ml-108 items-center gap-6">
+        <Link 
+            href="/generate" 
+            className="flex items-center gap-2 text-black font-semibold hover:text-blue-500 transition-colors"
+        >
+            <span>NovaGenerate</span>
+        </Link>
+        <Link 
+            href="/video-mixer" 
+            className="flex items-center gap-2 text-black font-semibold hover:text-blue-500 transition-colors"
+        >
+            <span>NovaMix</span>
+        </Link>
+        {/* Kalau mau nambah menu lain di tengah, tinggal tambah Link di sini */}
+      </nav>
+
+      <div className="flex items-center ml-auto gap-4">
         {user ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Avatar className="cursor-pointer hover:bg-gray-100 transition rounded-md h-10 w-10">
+              <Avatar className="cursor-pointer data-[state=open]:bg-gray-100 rounded-md h-10 w-10">
                 <AvatarImage src="" alt={user.name} />
-                <AvatarFallback className="font-bold">
+                <AvatarFallback className="font-bold bg-transparent">
                   <Menu className="h-6 w-6" />
                 </AvatarFallback>
               </Avatar>
