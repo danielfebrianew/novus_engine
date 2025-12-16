@@ -9,7 +9,6 @@ import {
   Sse,        
   MessageEvent,
   Param,
-  UseGuards,
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express'; 
 import { GenerateAiService } from './generate-ai.service';
@@ -19,10 +18,8 @@ import { Observable, fromEvent } from 'rxjs';
 import { map, filter } from 'rxjs/operators';
 import { ResponseInterceptor } from 'src/common/interceptors/response.interceptor';
 import { ResponseMessage } from 'src/common/decorators/response-message.decorator';
-import { JwtAuthGuard } from 'src/auth/jwt-auth.guard';
 
 @Controller('generate')
-@UseGuards(JwtAuthGuard)
 @UseInterceptors(ResponseInterceptor)
 export class GenerateAiController {
   constructor(
@@ -48,7 +45,7 @@ export class GenerateAiController {
   @Post('text')
   @ResponseMessage('Generate Text Berhasil')
   async generateText(@Body() dto: GenerateTextDto) {
-    return this.generateAiService.generateText(dto.imageUrl, dto.promptCount);
+    return this.generateAiService.generateText(dto.imageUrl, dto.promptCount, dto.productName);
   }
 
   @Post('video')
