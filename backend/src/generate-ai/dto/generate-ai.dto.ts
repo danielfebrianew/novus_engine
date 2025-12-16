@@ -10,6 +10,9 @@ export class GenerateTextDto {
   @Min(4, { message: 'Minimal 4 prompt' })
   @Max(6, { message: 'Maksimal 6 prompt' })
   promptCount?: number; 
+
+  @IsNotEmpty()
+  productName: string;
 }
 
 export class GenerateVideoDto {

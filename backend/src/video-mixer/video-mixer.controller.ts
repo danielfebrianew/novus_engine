@@ -15,16 +15,16 @@ import { VideoMixerService } from './video-mixer.service';
 export class VideoMixerController {
   constructor(private readonly videoService: VideoMixerService) {}
 
-  @Post('video-mix')
+  @Post('video-mixer')
   @UseInterceptors(
     FileFieldsInterceptor(
       [
-        { name: 'clips', maxCount: 6 }, // Maksimal 6 video klip
-        { name: 'audio', maxCount: 1 }, // 1 file audio
+        { name: 'clips', maxCount: 6 }, 
+        { name: 'audio', maxCount: 1 }, 
       ],
       {
         storage: diskStorage({
-          destination: './uploads', // Folder sementara upload
+          destination: './uploads', 
           filename: (req, file, cb) => {
             const randomName = Array(32).fill(null).map(() => (Math.round(Math.random() * 16)).toString(16)).join('');
             cb(null, `${randomName}${extname(file.originalname)}`);
@@ -35,7 +35,7 @@ export class VideoMixerController {
   )
   async stitchVideo(
     @UploadedFiles() files: { clips?: Express.Multer.File[], audio?: Express.Multer.File[] },
-    @Body('variations') variations: string // Input jumlah variasi dari body
+    @Body('variations') variations: string 
   ) {
     if (!files.clips || files.clips.length < 2) {
       throw new BadRequestException('Minimal upload 2 video klip.');

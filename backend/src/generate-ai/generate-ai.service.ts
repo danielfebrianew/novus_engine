@@ -80,7 +80,7 @@ export class GenerateAiService implements OnModuleInit {
     this.eventEmitter.emit('job.progress', {
       jobId,
       message,
-      progress // Kirim angka persen (misal 10, 50, 90) buat Progress Bar
+      progress 
     });
   }
 
@@ -166,42 +166,111 @@ export class GenerateAiService implements OnModuleInit {
   // =================================================================
   // A. PUBLIC METHOD: 1. ANALYZE IMAGE (OpenAI)
   // =================================================================
-  async generateText(imageUrl: string, count: number = 4) {
-    this.logger.log(`OpenAI: Analyzing image for ${count} prompts...`);
-
+ async generateText(imageUrl: string, count: number = 4, productName: string = "") {
+    // 1. Tentukan target jumlah video berdasarkan jumlah prompt gambar
+    let videoTargetCount = 20;
     let durationPrompt = "Target ≈20 seconds";
+
     switch (count) {
-      case 4: durationPrompt = "Target ≈20 seconds (±35-40 words)"; break;
-      case 5: durationPrompt = "Target ≈25 seconds (±40-45 words)"; break;
-      case 6: durationPrompt = "Target ≈30 seconds (±45-50 words)"; break;
-      default: throw new InternalServerErrorException('Count must be 4, 5, or 6');
+      case 4: 
+        videoTargetCount = 5; 
+        durationPrompt = "Target ≈20 seconds (±40-45 words)"; 
+        break;
+      case 5: 
+        videoTargetCount = 10; 
+        durationPrompt = "Target ≈25 seconds (±40-45 words)"; 
+        break;
+      case 6: 
+        videoTargetCount = 15; 
+        durationPrompt = "Target ≈30 seconds (±45-50 words)"; 
+        break;
+      default: 
+        throw new InternalServerErrorException('Count must be 4, 5, or 6');
     }
 
+    this.logger.log(`OpenAI: Analyzing image for ${count} prompts. Target: ${videoTargetCount} variations.`);
+
+    // 2. Prompt yang meminta KOMPONEN, bukan caption utuh (supaya hemat token & cepat)
     const promptText = `
       Analyze this image thoroughly.
-      Task: Create 3 JSON outputs:
-      1. "voiceover": Buatkan naskah voiceover yang PADAT dan JELAS dalam Bahasa Indonesia. Durasi: ${durationPrompt}. Gaya bahasa: Storytelling, santai, akrab, seperti me-review barang ke sahabat. Akhiri dengan ajakan cek keranjang kuning.
-      2. "tiktokCaption": Caption TikTok Bahasa Indonesia lengkap, engaging, dan relevan dengan gambar. Sertakan headline clickbait di baris pertama. Sertakan 4-5 hashtag relevan.
-      3. "videoPrompts": Array of ${count} distinct English visual prompts. Each must use different camera angles (Close Up, Pan, Zoom, etc.). Focus on aesthetics.
-      FORMAT: JSON ONLY { "voiceover": "...", "tiktokCaption": "...", "videoPrompts": [...] }
+      Name of the product is "${productName}".
+      
+      Task: Create a JSON output containing script, prompts, and CAPTION COMPONENTS to build ${videoTargetCount} variations.
+      
+      1. "voiceover": Naskah voiceover PADAT & JELAS (Bahasa Indonesia). Durasi: ${durationPrompt}. Gaya: Storytelling/Review jujur ke sahabat. Akhiri dengan ajakan cek keranjang kuning.
+      
+      2. "captionComponents": Kita butuh bahan untuk merakit banyak caption TikTok unik. Buatkan komponen berikut dalam Bahasa Indonesia:
+         - "hooks": 15 variasi headline clickbait/pertanyaan yang bikin penasaran (contoh: "Gak nyangka nemu ini...", "Solusi buat kamu yang...").
+         - "bodies": 10 variasi body text yang menjelaskan keunggulan produk "${productName}" dengan angle berbeda (aesthetic, fungsi, harga, dll).
+         - "ctas": 5 variasi kalimat ajakan (Call to Action) pendek.
+         - "hashtags": 5 set hashtags (tiap set isi 4-5 tag relevan).
+
+      3. "videoPrompts": Array of ${count} distinct English visual prompts. Each must use different camera angles (Close Up, Pan, Zoom, etc). Focus on aesthetics.
+
+      FORMAT JSON ONLY:
+      {
+        "voiceover": "...",
+        "captionComponents": {
+            "hooks": ["...", ...],
+            "bodies": ["...", ...],
+            "ctas": ["...", ...],
+            "hashtags": ["...", ...]
+        },
+        "videoPrompts": [...]
+      }
     `;
 
     try {
       const response = await this.openai.chat.completions.create({
         model: 'gpt-4o',
-        messages: [{ role: 'user', content: [{ type: 'text', text: promptText }, { type: 'image_url', image_url: { url: imageUrl } }] }],
+        messages: [
+          { 
+            role: 'user', 
+            content: [
+                { type: 'text', text: promptText }, 
+                { type: 'image_url', image_url: { url: imageUrl } }
+            ] 
+          }
+        ],
         response_format: { type: 'json_object' },
       });
       
       const content = response.choices[0].message.content;
       if (!content) throw new Error('OpenAI returned empty content');
-      return JSON.parse(content);
+      
+      const parsedData = JSON.parse(content);
+
+      // 3. RAKIT CAPTION (The Mixer Logic)
+      // Kita generate array caption sebanyak videoTargetCount (20/50/100)
+      const generatedCaptions: string[] = [];
+      const { hooks, bodies, ctas, hashtags } = parsedData.captionComponents;
+
+      for (let i = 0; i < videoTargetCount; i++) {
+        // Ambil acak dari komponen yang ada
+        const hook = hooks[Math.floor(Math.random() * hooks.length)];
+        const body = bodies[Math.floor(Math.random() * bodies.length)];
+        const cta = ctas[Math.floor(Math.random() * ctas.length)];
+        const tags = hashtags[Math.floor(Math.random() * hashtags.length)];
+
+        // Gabungkan jadi satu caption utuh
+        const fullCaption = `${hook}\n\n${body}\n\n${cta}\n\n${tags}`;
+        generatedCaptions.push(fullCaption);
+      }
+
+      // 4. Return format final
+      return {
+        voiceover: parsedData.voiceover,
+        videoPrompts: parsedData.videoPrompts,
+        captions: generatedCaptions, // Array string sebanyak 20, 50, atau 100
+        countSetting: count,
+        totalVariations: videoTargetCount
+      };
 
     } catch (error) {
       this.logger.error(error);
       throw new InternalServerErrorException('OpenAI Error');
     }
-  }
+}
 
   // =================================================================
   // B. PUBLIC METHOD: PROCESS VARIATIONS -> S3 URLS

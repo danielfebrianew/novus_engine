@@ -92,7 +92,7 @@ export default function VideoMixerPage() {
 
       // --- REQUEST AXIOS ---
       // Note: Backend kita return JSON berisi path, bukan Blob ZIP
-      const response = await axios.post("http://localhost:3000/api/v1/video-mix", formData, {
+      const response = await axios.post("http://localhost:3000/api/v1/video-mixer", formData, {
         headers: { "Content-Type": "multipart/form-data" },
         timeout: 0, // Infinity, karena proses video lama
       })
